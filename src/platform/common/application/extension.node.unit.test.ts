@@ -8,6 +8,9 @@ import { mockedVSCodeNamespaces, resetVSCodeMocks } from '../../../test/vscode-m
 import { DisposableStore } from '../utils/lifecycle';
 import { Extensions } from './extensions.node';
 import { EOL } from 'os';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 const stack1 = [
     'Error: ',
@@ -116,5 +119,43 @@ suite(`Interpreter Service`, () => {
         const { displayName, extensionId } = new Extensions([]).determineExtensionFromCallStack(stack2.join(EOL));
         assert.strictEqual(extensionId, 'ms-toolsai.vscode-jupyter-powertoys');
         assert.strictEqual(displayName, 'ms-toolsai.vscode-jupyter-powertoys');
+    });
+    test('Identify from callstack when extension dir is reached via a symlink', function () {
+        const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jvsc-ext-real-'));
+        const linkRoot = path.join(os.tmpdir(), `jvsc-ext-link-${Date.now()}`);
+        try {
+            const callerReal = path.join(realRoot, 'some.publisher-ext-1.0.0');
+            fs.mkdirSync(path.join(callerReal, 'out'), { recursive: true });
+            fs.writeFileSync(path.join(callerReal, 'out', 'extension.js'), '');
+            try {
+                fs.symlinkSync(realRoot, linkRoot, 'junction');
+            } catch {
+                // Symlink creation can fail on Windows without privileges; skip rather than fail.
+                this.skip();
+            }
+            const callerViaLink = path.join(linkRoot, 'some.publisher-ext-1.0.0', 'out', 'extension.js');
+            const symlinkExtensions = [
+                {
+                    id: 'ms-toolsai.jupyter',
+                    packageJSON: { displayName: 'ms-toolsai.jupyter' },
+                    extensionUri: Uri.file(path.join(realRoot, 'ms-toolsai.jupyter-2024.3.0'))
+                },
+                {
+                    id: 'some.publisher-ext',
+                    packageJSON: { displayName: 'some.publisher-ext' },
+                    extensionUri: Uri.file(callerReal)
+                }
+            ];
+            when(mockedVSCodeNamespaces.extensions.all).thenReturn(symlinkExtensions as any);
+            when(mockedVSCodeNamespaces.extensions.getExtension(anything())).thenCall(function (id: string) {
+                return symlinkExtensions.find((e) => e.id === id);
+            });
+            const stack = ['Error:', `    at activate (${callerViaLink}:1:1)`].join(EOL);
+            const { extensionId } = new Extensions([]).determineExtensionFromCallStack(stack);
+            assert.strictEqual(extensionId, 'some.publisher-ext');
+        } finally {
+            fs.rmSync(linkRoot, { force: true, recursive: true });
+            fs.rmSync(realRoot, { force: true, recursive: true });
+        }
     });
 });

@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import * as fs from 'fs';
 import { inject, injectable } from 'inversify';
 import { extensions, type Extension } from 'vscode';
 import { IDisposableRegistry, IExtensions } from '../types';
@@ -61,13 +62,43 @@ export class Extensions implements IExtensions {
                         frames.push(fileName);
                     }
                 });
+                // The stack-frame path and `extensionUri.fsPath` can differ only by symlink resolution
+                // (e.g. when `~/.vscode-server` is a symlink, common on remote/coder/devcontainer setups).
+                // A plain `startsWith()` then fails and the caller resolves to "unknown", which auto-denies
+                // kernel API access without ever showing the consent prompt. Compare canonical (realpath)
+                // forms in addition to the literal paths.
+                const realpathCache = new Map<string, string>();
+                const realLower = (p: string): string => {
+                    const cached = realpathCache.get(p);
+                    if (cached !== undefined) {
+                        return cached;
+                    }
+                    let resolved: string;
+                    try {
+                        resolved = fs.realpathSync(p).toLowerCase();
+                    } catch {
+                        resolved = p.toLowerCase();
+                    }
+                    realpathCache.set(p, resolved);
+                    return resolved;
+                };
                 for (const frame of frames) {
-                    const matchingExt = this.extensions.find(
-                        (ext) =>
-                            ext.id !== JVSC_EXTENSION_ID &&
-                            (frame.toLowerCase().startsWith(ext.extensionUri.fsPath.toLowerCase()) ||
-                                frame.toLowerCase().startsWith(ext.extensionUri.path.toLowerCase()))
-                    );
+                    const frameLower = frame.toLowerCase();
+                    const frameReal = realLower(frame);
+                    const matchingExt = this.extensions.find((ext) => {
+                        if (ext.id === JVSC_EXTENSION_ID) {
+                            return false;
+                        }
+                        const fsPathLower = ext.extensionUri.fsPath.toLowerCase();
+                        if (
+                            frameLower.startsWith(fsPathLower) ||
+                            frameLower.startsWith(ext.extensionUri.path.toLowerCase())
+                        ) {
+                            return true;
+                        }
+                        const fsPathReal = realLower(ext.extensionUri.fsPath);
+                        return frameReal.startsWith(fsPathReal) || frameReal.startsWith(fsPathLower);
+                    });
                     if (matchingExt) {
                         return { extensionId: matchingExt.id, displayName: matchingExt.packageJSON.displayName };
                     }
